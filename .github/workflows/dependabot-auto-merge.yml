@@ -1,0 +1,119 @@
+name: Dependabot auto-merge
+
+# Turns on auto-merge (rebase) for a pull request Dependabot opens, so it
+# merges by itself once the repository's required checks pass.
+#
+# Only use it in a repository whose main has required status checks.
+# Otherwise auto-merge merges straight away, before CI has said anything.
+#
+# Call it from a repository with:
+#
+#   on:
+#     pull_request:
+#       types: [opened, reopened]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     dependabot:
+#       uses: LeafLab-sh/shared-workflows/.github/workflows/dependabot-auto-merge.yml@<sha> # vX.Y.Z
+#       with:
+#         approve: true
+#         app-client-id: ${{ vars.LEAFLAB_AUTOMATION_CLIENT_ID }}
+#       secrets:
+#         app-private-key: ${{ secrets.LEAFLAB_AUTOMATION_PRIVATE_KEY }}
+#
+# Which token does the work:
+#
+# - With the automation App's client ID and private key, the App does. Use
+#   this when anything has to run after the merge (release-please on push).
+#   GitHub starts no workflow for anything done with a workflow's own
+#   GITHUB_TOKEN, so a pull request merged with that token never triggers
+#   them. The private key must be a Dependabot secret: a run that
+#   Dependabot's pull request starts gets those, not the Actions secrets.
+#   It must be the App's private key (PEM), not its OAuth client secret.
+# - Without them, the workflow's GITHUB_TOKEN does, with a warning.
+#
+# Safe on `pull_request`: a fork's run gets no secrets and a read-only token,
+# and the job runs only for a pull request Dependabot opened in this
+# repository. It checks out and runs no code from the pull request.
+
+on:
+  workflow_call:
+    inputs:
+      update-types:
+        description: >-
+          Comma-separated update types to auto-merge, as dependabot/fetch-metadata
+          reports them: version-update:semver-patch, version-update:semver-minor,
+          version-update:semver-major.
+        type: string
+        default: version-update:semver-patch,version-update:semver-minor
+      approve:
+        description: Also approve the pull request (for repositories that require a review).
+        type: boolean
+        default: false
+      app-client-id:
+        description: Client ID of the automation GitHub App (not secret, so pass a variable).
+        type: string
+        default: ""
+    secrets:
+      app-private-key:
+        description: Private key (PEM) of the automation GitHub App. Must be a Dependabot secret.
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      HAS_APP: ${{ inputs.app-client-id != '' && secrets.app-private-key != '' }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+    steps:
+      - name: Read the update's metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Decide whether this update type auto-merges
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          ALLOWED: ${{ inputs.update-types }}
+        run: |
+          if [[ ",${ALLOWED// /}," == *",${UPDATE_TYPE},"* ]]; then
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+            echo "${UPDATE_TYPE:-(none)} is in the allowed update types, so auto-merge goes on."
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+            echo "${UPDATE_TYPE:-(none)} isn't in the allowed update types (${ALLOWED}), so this pull request waits for someone."
+          fi
+
+      - name: Say that the App isn't set up
+        if: steps.decide.outputs.allowed == 'true' && env.HAS_APP != 'true'
+        run: echo "::warning::No automation App client ID and private key were passed, so GITHUB_TOKEN enables auto-merge. Workflows that should run after the merge (on push) won't be triggered."
+
+      - name: Take a token as the automation App
+        id: app
+        if: steps.decide.outputs.allowed == 'true' && env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+
+      - name: Approve
+        if: steps.decide.outputs.allowed == 'true' && inputs.approve
+        run: gh pr review --approve "$PR_URL"
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+
+      - name: Enable auto-merge
+        if: steps.decide.outputs.allowed == 'true'
+        run: gh pr merge --auto --rebase "$PR_URL"
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
