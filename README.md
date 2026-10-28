@@ -17,7 +17,6 @@ name: Commits
 
 on:
   pull_request:
-  merge_group:
 
 permissions:
   contents: read
@@ -29,7 +28,7 @@ jobs:
 
 Pin by SHA. In repositories whose `dependabot.yml` includes the `github-actions` ecosystem, Dependabot keeps the pin current.
 
-The required status check is named **`commits / validate`**. Outside pull requests (`merge_group`, `push`), it passes without checking anything, so it can be required in a repository with a merge queue.
+The required status check is named **`commits / validate`**. Outside pull requests (a `push`, say), it passes without checking anything.
 
 ## `dependabot-auto-merge.yml`
 

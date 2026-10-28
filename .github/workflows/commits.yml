@@ -11,7 +11,6 @@ name: Commits
 #
 #   on:
 #     pull_request:
-#     merge_group:
 #   permissions:
 #     contents: read
 #   jobs:
@@ -19,9 +18,7 @@ name: Commits
 #       uses: LeafLab-sh/shared-workflows/.github/workflows/commits.yml@<sha> # vX.Y.Z
 #
 # The check is named `commits / validate`. On anything other than a pull
-# request (a merge queue's `merge_group`, a push), it passes without checking
-# anything, so that it can be a required check in a repository with a merge
-# queue. The pull request's own run already checked the commits.
+# request (a push, say), it passes without checking anything.
 #
 # Safe on pull requests from forks: it only reads the repository, runs no code
 # from it, and passes the SHAs through the environment, never into the script.
