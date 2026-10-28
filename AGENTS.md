@@ -1,6 +1,6 @@
 # For agents working in this repository
 
-Reusable GitHub Actions workflows for every LeafLab-sh repository, specified in the `leaflab` store under `standards/shared-workflows`. [`README.md`](README.md) documents each workflow, its inputs and its gotchas. A change here reaches every caller only when it is released (a semver tag and GitHub release on the merged commit) and callers move their SHA pin. Keep the repository public, and never run code from the pull request a workflow checks.
+Reusable GitHub Actions workflows for every LeafLab-sh repository, specified in the `leaflab` store under `standards/shared-workflows`. [`README.md`](README.md) documents each workflow, its inputs and its gotchas. A change here reaches every caller only when it is released and callers move their SHA pin. Releases are made by release-please (`release.yml`): merging its release pull request tags `vX.Y.Z` and writes the GitHub release, so the commit types decide the version (`standards/releases`). Never tag by hand; the org lets only the `leaflab-automation` App create `v*` tags. Keep the repository public, and never run code from the pull request a workflow checks.
 
 ## Working in LeafLab-sh
 
