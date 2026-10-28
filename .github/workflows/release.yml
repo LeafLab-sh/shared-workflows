@@ -1,0 +1,38 @@
+name: Release
+
+# release-please makes the releases from the commit messages on main. Each push
+# to main updates a pull request titled "chore(main): release x.y.z" with the
+# next version and its CHANGELOG.md entry. Merging it tags vX.Y.Z and writes
+# the GitHub release; callers then move their SHA pin to it.
+#
+# release-please acts as the org's automation App: only the App may create v*
+# tags (org ruleset), and CI runs on a pull request the App opens. There is no
+# fallback to the workflow's own token, so without the App's key the run fails.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Take a token as the automation App
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.LEAFLAB_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.LEAFLAB_AUTOMATION_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
