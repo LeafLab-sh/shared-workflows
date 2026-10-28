@@ -1,0 +1,196 @@
+name: Dependabot triage
+
+# Opens a Linear issue, in the team's Triage state, when a workflow fails on
+# a Dependabot pull request. A failed update doesn't merge by itself (see
+# dependabot-auto-merge.yml), so someone has to look at it, and this is how
+# they hear about it.
+#
+# Call it from a repository with:
+#
+#   on:
+#     workflow_run:
+#       workflows: [CI, Commits]
+#       types: [completed]
+#   permissions:
+#     actions: read
+#     contents: read
+#     pull-requests: read
+#   jobs:
+#     triage:
+#       uses: LeafLab-sh/shared-workflows/.github/workflows/dependabot-triage.yml@<sha> # vX.Y.Z
+#       with:
+#         linear-team: LEA
+#         linear-client-id: ${{ vars.LINEAR_CLIENT_ID }}
+#       secrets:
+#         linear-client-secret: ${{ secrets.LINEAR_CLIENT_SECRET }}
+#
+# It does nothing unless the run failed, was for a pull request, and came from
+# a `dependabot/` branch in this repository. While an issue that links the
+# pull request is still open, it opens no other.
+#
+# Linear: an OAuth app with "client credentials tokens" turned on. The token
+# it takes acts as the app, has the scopes `read` and `issues:create`, and is
+# masked in the log. The client secret must be a Dependabot secret as well as
+# an Actions secret: a run that follows Dependabot's pull request gets only
+# Dependabot secrets.
+#
+# Safe on `workflow_run`: it runs this file from the default branch, never the
+# pull request's code, checks nothing out, and passes everything that came
+# from the pull request (its title, branch, URLs) through the environment and
+# jq, never into a script or a query string.
+
+on:
+  workflow_call:
+    inputs:
+      linear-team:
+        description: Key of the Linear team the issue goes to, e.g. LEA.
+        type: string
+        required: true
+      linear-client-id:
+        description: Client ID of the Linear OAuth app (not secret, so pass a variable).
+        type: string
+        required: true
+    secrets:
+      linear-client-secret:
+        description: Client secret of the Linear OAuth app. Must also be a Dependabot secret.
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  triage:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/') &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    # Two workflows can fail on the same pull request at once. One at a time,
+    # so the second sees the first's issue and opens no other.
+    concurrency:
+      group: dependabot-triage-${{ github.repository }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_NAME: ${{ github.event.workflow_run.name }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      LINEAR_TEAM: ${{ inputs.linear-team }}
+      LINEAR_CLIENT_ID: ${{ inputs.linear-client-id }}
+      LINEAR_CLIENT_SECRET: ${{ secrets.linear-client-secret }}
+    steps:
+      - name: Find the pull request and what failed
+        id: pr
+        run: |
+          pr=$(gh api "repos/$REPO/pulls?state=open&head=${REPO%%/*}:$HEAD_BRANCH" --jq '.[0]')
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "No open pull request for $HEAD_BRANCH, so nothing to triage."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          author=$(jq -r '.user.login' <<< "$pr")
+          if [ "$author" != "dependabot[bot]" ]; then
+            echo "The pull request for $HEAD_BRANCH was opened by $author, not Dependabot."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq -r '.number' <<< "$pr" > "$RUNNER_TEMP/pr-number"
+          jq -r '.title' <<< "$pr" > "$RUNNER_TEMP/pr-title"
+          jq -r '.html_url' <<< "$pr" > "$RUNNER_TEMP/pr-url"
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure") | "- [\(.name)](\(.html_url))"' \
+            > "$RUNNER_TEMP/failed-jobs"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Take a Linear token as the app
+        if: steps.pr.outputs.found == 'true'
+        run: |
+          response=$(curl -sS --fail-with-body -X POST https://api.linear.app/oauth/token \
+            -u "$LINEAR_CLIENT_ID:$LINEAR_CLIENT_SECRET" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode grant_type=client_credentials \
+            --data-urlencode 'scope=read,issues:create') || {
+              echo "::error title=Linear token::The token request failed. Is \"client credentials tokens\" turned on for the Linear app, and is the secret a Dependabot secret?"
+              exit 1
+            }
+          token=$(jq -r '.access_token // empty' <<< "$response")
+          [ -n "$token" ] || { echo "::error title=Linear token::No access_token in Linear's response."; exit 1; }
+          echo "::add-mask::$token"
+          echo "LINEAR_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Open the triage issue, unless one is open already
+        if: steps.pr.outputs.found == 'true'
+        run: |
+          linear() {
+            # $1: the query; the rest: jq --arg pairs for its variables.
+            local query=$1; shift
+            local body response
+            body=$(jq -n --arg query "$query" "$@" '{query: $query, variables: $ARGS.named | del(.query)}')
+            response=$(curl -sS --fail-with-body https://api.linear.app/graphql \
+              -H "Authorization: Bearer $LINEAR_TOKEN" -H 'Content-Type: application/json' \
+              --data "$body")
+            if jq -e '.errors' <<< "$response" > /dev/null; then
+              echo "::error title=Linear API::$(jq -c '.errors' <<< "$response")"
+              return 1
+            fi
+            echo "$response"
+          }
+
+          pr_number=$(cat "$RUNNER_TEMP/pr-number")
+          pr_title=$(cat "$RUNNER_TEMP/pr-title")
+          pr_url=$(cat "$RUNNER_TEMP/pr-url")
+
+          team=$(linear 'query($key: String!) {
+              teams(filter: {key: {eq: $key}}) {
+                nodes { id states(filter: {type: {eq: "triage"}}) { nodes { id } } }
+              }
+            }' --arg key "$LINEAR_TEAM")
+          team_id=$(jq -r '.data.teams.nodes[0].id // empty' <<< "$team")
+          triage_id=$(jq -r '.data.teams.nodes[0].states.nodes[0].id // empty' <<< "$team")
+          [ -n "$team_id" ] || { echo "::error title=Linear team::No Linear team with the key $LINEAR_TEAM."; exit 1; }
+
+          open=$(linear 'query($key: String!, $url: String!) {
+              issues(first: 1, filter: {
+                team: {key: {eq: $key}},
+                description: {contains: $url},
+                state: {type: {nin: ["completed", "canceled", "duplicate"]}}
+              }) { nodes { identifier url } }
+            }' --arg key "$LINEAR_TEAM" --arg url "$pr_url")
+          existing=$(jq -r '.data.issues.nodes[0] | select(.) | "\(.identifier) \(.url)"' <<< "$open")
+          if [ -n "$existing" ]; then
+            echo "Already open for $pr_url: $existing"
+            echo "Already open: $existing" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          failed_jobs=$(cat "$RUNNER_TEMP/failed-jobs")
+          description=$(printf '%s\n' \
+            "Dependabot's pull request failed **$RUN_NAME**, so it won't merge by itself." \
+            "" \
+            "- **Pull request:** [$REPO#$pr_number]($pr_url)" \
+            "- **Failed run:** [$RUN_NAME]($RUN_URL) on \`${HEAD_SHA:0:7}\`" \
+            "" \
+            "**Failed jobs:**" \
+            "" \
+            "${failed_jobs:-- (none reported)}" \
+            "" \
+            "Fix the update on its branch, close the pull request, or tell Dependabot to ignore the version (\`@dependabot ignore this minor version\`).")
+          title="Dependabot update failed: $REPO#$pr_number $pr_title"
+
+          input=$(jq -n --arg teamId "$team_id" --arg stateId "$triage_id" \
+            --arg title "${title:0:250}" --arg description "$description" \
+            '{teamId: $teamId, title: $title, description: $description}
+             + (if $stateId == "" then {} else {stateId: $stateId} end)')
+          created=$(linear 'mutation($input: IssueCreateInput!) {
+              issueCreate(input: $input) { success issue { identifier url } }
+            }' --argjson input "$input")
+          issue=$(jq -r '.data.issueCreate.issue | "\(.identifier) \(.url)"' <<< "$created")
+          echo "Opened $issue"
+          echo "Opened $issue for $pr_url" >> "$GITHUB_STEP_SUMMARY"
