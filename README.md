@@ -66,8 +66,44 @@ jobs:
 |---|---|
 | `app-private-key` | Private key (PEM) of the automation GitHub App. When it and `app-client-id` are both set, the App does the approving and enabling. Without them, `GITHUB_TOKEN` does, with a warning. |
 
+## `dependabot-triage.yml`
+
+When a workflow fails on a Dependabot pull request, this opens a Linear issue in the team's Triage state. The issue links the PR, the failed run and its failed jobs. While an issue that links the PR is open, no other is opened.
+
+```yaml
+name: Dependabot triage
+
+on:
+  workflow_run:
+    workflows: [CI, Commits]  # the workflows whose failure should be triaged
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  triage:
+    uses: LeafLab-sh/shared-workflows/.github/workflows/dependabot-triage.yml@<sha> # vX.Y.Z
+    with:
+      linear-team: LEA
+      linear-client-id: ${{ vars.LINEAR_CLIENT_ID }}
+    secrets:
+      linear-client-secret: ${{ secrets.LINEAR_CLIENT_SECRET }}
+```
+
+| Input / secret | Meaning |
+|---|---|
+| `linear-team` | Key of the Linear team that gets the issue. |
+| `linear-client-id` | Client ID of the Linear OAuth app. |
+| `linear-client-secret` | Its client secret. |
+
 ## Gotchas
 
+- **The Linear app needs "client credentials tokens" turned on** in its settings. Without it, Linear refuses the token request. The token acts as the app, with the scopes `read` and `issues:create`.
+- **`LINEAR_CLIENT_SECRET` must also be a Dependabot secret.** A `workflow_run` that follows a Dependabot PR's run only gets Dependabot secrets.
+- **`workflow_run` runs the caller from the default branch.** A change to the caller takes effect once it's merged, and re-running a failed check on a Dependabot PR triages it again.
 - **Pass the automation App** wherever something has to run after a Dependabot merge (release-please on `push`). GitHub starts no workflow for anything done with a workflow's `GITHUB_TOKEN`, so a PR merged that way never triggers them.
 - **The App's private key must be a Dependabot secret** (Settings → Secrets → Dependabot), not only an Actions secret. Runs started by Dependabot only receive Dependabot secrets.
 - **It must be the private key (PEM)**, generated in the App's settings. The App's OAuth client secret can't mint installation tokens.
