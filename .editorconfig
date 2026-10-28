@@ -1,12 +1,18 @@
+# The LeafLab-sh org default (standards/repository-files in the leaflab spec
+# store), for a repository with no formatter of its own.
+root = true
+
 [*]
 charset = utf-8
+end_of_line = lf
 indent_style = space
 insert_final_newline = true
 trim_trailing_whitespace = true
 max_line_length = 120
 
-[*.{yml, yaml}]
+[*.{yml,yaml,json}]
 indent_size = 2
 
 [*.md]
+trim_trailing_whitespace = false
 max_line_length = off
