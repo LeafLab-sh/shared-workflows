@@ -137,7 +137,7 @@ jobs:
               -H "Authorization: Bearer $LINEAR_TOKEN" -H 'Content-Type: application/json' \
               --data "$body")
             if jq -e '.errors' <<< "$response" > /dev/null; then
-              echo "::error title=Linear API::$(jq -c '.errors' <<< "$response")"
+              echo "::error title=Linear API::$(jq -c '.errors' <<< "$response")" >&2
               return 1
             fi
             echo "$response"
@@ -154,7 +154,16 @@ jobs:
             }' --arg key "$LINEAR_TEAM")
           team_id=$(jq -r '.data.teams.nodes[0].id // empty' <<< "$team")
           triage_id=$(jq -r '.data.teams.nodes[0].states.nodes[0].id // empty' <<< "$team")
-          [ -n "$team_id" ] || { echo "::error title=Linear team::No Linear team with the key $LINEAR_TEAM."; exit 1; }
+          if [ -z "$team_id" ]; then
+            # Say who the token is and what it can see, so the cause is in the
+            # log: no teams at all is an access problem, other keys a typo.
+            who=$(linear 'query { viewer { name displayName } }' || true)
+            echo "The token acts as: $(jq -c '.data.viewer // "unknown"' <<< "${who:-{\}}")"
+            seen=$(linear 'query { teams(first: 50) { nodes { key name private } } }' || true)
+            echo "Teams it can see: $(jq -c '[(.data.teams.nodes // [])[] | "\(.key) (\(.name)\(if .private then ", private" else "" end))"]' <<< "${seen:-{\}}")"
+            echo "::error title=Linear team::The Linear app can't see a team with the key $LINEAR_TEAM. The teams it can see are listed in the log. Give the app access to the team on its details page in Linear."
+            exit 1
+          fi
 
           open=$(linear 'query($key: String!, $url: String!) {
               issues(first: 1, filter: {
