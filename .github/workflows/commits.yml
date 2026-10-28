@@ -1,0 +1,110 @@
+name: Commits
+
+# Checks every commit in a pull request against the org's commit norms:
+#
+# 1. The message is a Conventional Commit (commitlint, config below).
+# 2. No `fixup!`, `squash!` or `amend!` commits. Autosquash them before
+#    merging. They must never reach main. commitlint ignores these by
+#    default, so they get their own check.
+#
+# Call it from a repository with:
+#
+#   on:
+#     pull_request:
+#     merge_group:
+#   permissions:
+#     contents: read
+#   jobs:
+#     commits:
+#       uses: LeafLab-sh/shared-workflows/.github/workflows/commits.yml@<sha> # vX.Y.Z
+#
+# The check is named `commits / validate`. On anything other than a pull
+# request (a merge queue's `merge_group`, a push), it passes without checking
+# anything, so that it can be a required check in a repository with a merge
+# queue. The pull request's own run already checked the commits.
+#
+# Safe on pull requests from forks: it only reads the repository, runs no code
+# from it, and passes the SHAs through the environment, never into the script.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip outside pull requests
+        if: github.event_name != 'pull_request'
+        run: echo "Not a pull request (${{ github.event_name }}), so there are no commits to check."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          # The pull request's commits, for their messages.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject fixup!, squash! and amend! commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          found=$(git log --format='%h %s' "$BASE..$HEAD" | grep -E '^[0-9a-f]+ (fixup|squash|amend)! ' || true)
+          if [ -n "$found" ]; then
+            while IFS= read -r line; do
+              echo "::error title=Unsquashed commit::$line"
+            done <<< "$found"
+            echo "Autosquash before merging: GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/main && git push --force-with-lease"
+            exit 1
+          fi
+          echo "No fixup!, squash! or amend! commits."
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: github.event_name == 'pull_request'
+        with:
+          node-version: 24
+
+      # Installed outside the checkout, so the repository's own package.json
+      # and config play no part, and every repository gets the same rules.
+      - name: Install commitlint
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir commitlint && cd commitlint
+          echo '{"private":true}' > package.json
+          npm install --no-save --no-package-lock --no-audit --no-fund \
+            @commitlint/cli@21.2.4 @commitlint/config-conventional@21.2.4
+          # The org's rules: config-conventional, with its two blank-line
+          # warnings made errors, and the two robots whose messages nobody
+          # can reword (release-please, Dependabot) left alone.
+          cat > commitlint.config.mjs <<'EOF'
+          import conventional from "@commitlint/config-conventional";
+          export default {
+            ...conventional,
+            rules: {
+              ...conventional.rules,
+              "body-leading-blank": [2, "always"],
+              "footer-leading-blank": [2, "always"],
+            },
+            ignores: [
+              (message) => /^chore\(main\): release \d+\.\d+\.\d+/.test(message),
+              (message) => /^Signed-off-by: dependabot\[bot\]/m.test(message),
+            ],
+          };
+          EOF
+
+      - name: Check the commit messages
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          TOOL: ${{ runner.temp }}/commitlint
+        run: >-
+          node "$TOOL/node_modules/@commitlint/cli/cli.js"
+          --config "$TOOL/commitlint.config.mjs"
+          --cwd "$GITHUB_WORKSPACE"
+          --from "$BASE" --to "$HEAD"

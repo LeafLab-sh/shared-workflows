@@ -1,0 +1,14 @@
+name: CI
+
+# This repository's own commits, checked by the workflow it ships.
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  commits:
+    uses: ./.github/workflows/commits.yml
